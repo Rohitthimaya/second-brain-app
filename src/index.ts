@@ -1,12 +1,13 @@
-import bodyParser from "body-parser";
 import express from "express";
-import { userSchema, userSchemaTs } from "./validations/validations";
+import { userSchema, userSchemaTs } from "./validations/uservalidation";
 import { connectDB } from "./db/db"
-import User from "./db/userSchema";
+import User from "./db/schemas/userSchema";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import * as dotenv from "dotenv";
 import {authenticateToken, AuthenticatedRequest} from "./middleware/middleware"
+import { contentSchema } from "./validations/contentvalidation";
+import contentSchemaDB from "./db/schemas/contentSchema";
 
 const app = express();
 app.use(express.json());
@@ -99,11 +100,54 @@ app.post("/api/v1/signin", async (req, res) => {
     }
 })
 
-app.post("/api/v1/content", authenticateToken, (req: AuthenticatedRequest, res) => {
-    const user = req.user;
-    res.status(200).json({ message: `Hello, ${user?.username}` });
-  });
+app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest, res) => {
+    try {
+        const user = req.user;
+        const content = {
+            type: req.body.type,
+            link: req.body.link,
+            title: req.body.title,
+            tags: req.body.tags,
+            userId: user?.id
+        }
+        const parsedContent = contentSchema.safeParse(content)
+
+        if (!parsedContent.success) {
+            res.status(400).json({
+                error: parsedContent.error.flatten().fieldErrors,
+            });
+            return;
+        }
+
+        const contentAdded = await contentSchemaDB.create(content)
+
+        if(contentAdded){
+            res.status(200).json({ contentAdded });
+            return
+        }
+        
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Something went wrong." });
+        return
+    }
+});
+
+app.get("/api/v1/content", authenticateToken, (req:AuthenticatedRequest, red) => {
+
+})
+
+app.delete("/api/v1/content", authenticateToken, (req:AuthenticatedRequest, res) => {
+
+})
+
+app.post("/api/v1/brain/share", (req: AuthenticatedRequest, res) => {
+
+})
   
+app.get("/api/v1/brain/:shareLink", (req:AuthenticatedRequest, res) => {
+
+})
 
 app.listen(3000, () => {
     console.log(`App running on port: ${3000}`)
