@@ -133,16 +133,41 @@ app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest,
     }
 });
 
-app.get("/api/v1/content", authenticateToken, (req:AuthenticatedRequest, red) => {
+app.get("/api/v1/content", authenticateToken, async (req:AuthenticatedRequest, res) => {
+    try {
+        const user = req.user;
 
+        const userContent = await contentSchemaDB.find({ userId: user?.id })
+
+        if(userContent){
+            res.status(200).json({ userContent });
+            return
+        }
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Something went wrong." });
+        return
+    }
 })
 
-app.delete("/api/v1/content", authenticateToken, (req:AuthenticatedRequest, res) => {
-
+app.delete("/api/v1/content", authenticateToken, async (req:AuthenticatedRequest, res) => {
+    try {
+        const contentId = req.body.contentId;
+        const deleted = await contentSchemaDB.deleteOne({_id: contentId })
+        if(deleted){
+            res.status(200).json({ message: "Content Deleted" });
+            return
+        }
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Something went wrong." });
+        return
+    }
 })
 
 app.post("/api/v1/brain/share", (req: AuthenticatedRequest, res) => {
-
+    
 })
   
 app.get("/api/v1/brain/:shareLink", (req:AuthenticatedRequest, res) => {
