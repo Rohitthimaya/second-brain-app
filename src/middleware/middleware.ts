@@ -7,6 +7,7 @@ dotenv.config();
 type DecodedUser = {
   id: string;
   username: string;
+  shared: boolean
 };
 
 export interface AuthenticatedRequest extends Request {
@@ -33,6 +34,7 @@ export const authenticateToken = (
       req.user = {
         id: decoded.id,
         username: decoded.username,
+        shared: decoded.shared
       };
       next();
     } else {
