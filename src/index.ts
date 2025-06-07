@@ -11,13 +11,33 @@ import linkSchema from "./db/schemas/linkSchema"
 import Link from "./db/schemas/linkSchema";
 import { random } from "./utils";
 import Content from "./db/schemas/contentSchema";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+import pdfParse from 'pdf-parse';
+import axios from "axios";
+import { MilvusClient, DataType } from '@zilliz/milvus2-sdk-node';
+import { TwitterApi } from 'twitter-api-v2';
+import { YoutubeTranscript } from "youtube-transcript";
+import cors from "cors";
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cors());
+
 
 dotenv.config();
 connectDB()
+
+// Replace with your Bearer Token from https://developer.twitter.com
+const twitterClient = new TwitterApi(`${process.env.Bearer_Token}`);
+
+const address = `${process.env.address}`;
+const token = `${process.env.token}`
+// connect to milvus
+const client = new MilvusClient({ address, token });
+
 
 // Sign Up
 app.post("/api/v1/signup", async (req, res) => {
@@ -104,6 +124,189 @@ app.post("/api/v1/signin", async (req, res) => {
     }
 })
 
+// Configure multer to store uploaded PDFs in /uploads folder
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const uploadPath = path.join(__dirname, 'uploads');
+        if (!fs.existsSync(uploadPath)) {
+            fs.mkdirSync(uploadPath);
+        }
+        cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+        cb(null, `${uniqueSuffix}-${file.originalname}`);
+    }
+});
+
+const upload = multer({
+    storage: storage,
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype !== 'application/pdf') {
+            return cb(null, false);
+        }
+        cb(null, true);
+    }
+});
+
+app.post("/pdf/index", upload.single('file'), async (req, res) => {
+    // TODO1: Get the pdf file
+    const pdfFilePath = req.file?.path;
+    const pdfFileName = req.file?.filename;
+
+    // TODO2: Convert entire feedback into text (pdf parse)
+    if (!pdfFilePath || !pdfFileName) {
+        res.status(400).json({ message: 'No PDF file uploaded' });
+        return;
+    }
+
+    const dataBuffer = fs.readFileSync(pdfFilePath);
+    const pdfData = await pdfParse(dataBuffer);
+    const extractedText = pdfData.text;
+    console.log("Extracted text:", extractedText);
+
+    // TODO3: Convert pdf file text into small small chunks
+    const words = extractedText.split(/\s+/)
+    const chunkSize = 1000;
+    const chunks = [];
+
+    for (let i = 0; i < words.length; i += chunkSize) {
+        const chuck = words.slice(i, i + chunkSize).join(' ');
+        chunks.push(chuck)
+    }
+
+    // TODO4: Convert each chunck to vector embedding [We will be using SentenceTransformer (python)]
+    const response = await axios.post("http://127.0.0.1:5000/embed", {
+        texts: chunks
+    });
+
+    const chunkEmbeddings = response.data.embeddings;
+
+    chunkEmbeddings.forEach((embedding: any, index: any) => {
+        console.log(`Embedding for chunk ${index}:`, embedding);
+    });
+
+    // TODO5: Store vector embedding in vector database [Millivus]
+    // Prepare records
+    const records = chunks.map((chunk, idx) => ({
+        text: chunk,
+        vector: chunkEmbeddings[idx],
+    }));
+
+    // Insert into Milvus
+    const result = await client.insert({
+        collection_name: "embeddings",
+        data: records,
+    });
+
+    console.log(result)
+
+    // Delete the file
+    if (pdfFilePath) {
+        fs.unlinkSync(pdfFilePath);
+        console.log("file deleted")
+    }
+    res.json({
+        message: "Success"
+    })
+    return
+})
+
+app.post("/query", async (req, res) => {
+    try {
+        const { query } = req.body;
+
+        if (!query) {
+            res.status(400).json({ message: "Query required" });
+        }
+
+        // Step 1: Get embedding of query
+        const response = await axios.post("http://127.0.0.1:5000/embed", {
+            texts: [query]
+        });
+
+        const queryEmbedding = response.data.embeddings[0];
+        console.log("Query embedding:", queryEmbedding);
+
+        // Step 2: Search Milvus for similar chunks
+        const searchResult = await client.search({
+            collection_name: "embeddings",
+            vector: queryEmbedding,
+            limit: 5,
+            output_fields: ["text", "title"],
+            params: {
+                anns_field: "vector",
+                topk: "5",
+                metric_type: "COSINE", // or "IP" or "COSINE"
+                params: JSON.stringify({ nprobe: 10 }),
+            },
+        });
+
+
+        const title = searchResult.results[0].title;
+        console.log(title)
+
+        const relevantText = searchResult.results.map(hit => hit.text);
+        const context = relevantText.join("\n\n");
+
+        console.log("Search Result: " + JSON.stringify(searchResult));
+        console.log("Query received:", query);
+        console.log("Top context chunks:\n", context);
+
+        // Step 3: Ask LLaMA 3 via Ollama
+        const llamaResponse = await axios.post("http://localhost:11434/api/generate", {
+            model: "llama3",
+            prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`,
+            stream: false
+        });
+
+        const answer = llamaResponse.data.response;
+
+        res.json({
+            answer,
+            title,
+            context: relevantText
+        });
+
+    } catch (error) {
+        console.error("Error during query handling:", error);
+        res.status(500).json({ message: "Something went wrong!" });
+    }
+});
+
+function extractTweetId(url: string): string | null {
+    const match = url.match(/status\/(\d+)/);
+    return match ? match[1] : null;
+}
+
+async function fetchSingleTweetContent(tweetId: string): Promise<{ textChunks: string[], metadata: any[] }> {
+    const tweet = await twitterClient.v2.singleTweet(tweetId, {
+        "tweet.fields": ["text", "created_at", "id"]
+    });
+
+    const text = tweet.data.text;
+
+    // Optionally chunk the tweet text if it's very long
+    const words = text.split(/\s+/);
+    const chunkSize = 100; // words per chunk
+    const chunks: string[] = [];
+
+    for (let i = 0; i < words.length; i += chunkSize) {
+        chunks.push(words.slice(i, i + chunkSize).join(" "));
+    }
+
+    const metadata = [{
+        tweet_id: tweet.data.id,
+        created_at: tweet.data.created_at,
+        text: tweet.data.text
+    }];
+
+    return {
+        textChunks: chunks,
+        metadata
+    };
+}
+
 app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest, res) => {
     try {
         const user = req.user;
@@ -113,8 +316,9 @@ app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest,
             title: req.body.title,
             tags: req.body.tags,
             userId: user?.id
-        }
-        const parsedContent = contentSchema.safeParse(content)
+        };
+
+        const parsedContent = contentSchema.safeParse(content);
 
         if (!parsedContent.success) {
             res.status(400).json({
@@ -123,19 +327,97 @@ app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest,
             return;
         }
 
-        const contentAdded = await Content.create(content)
+        // Save content to DB
+        const contentAdded = await Content.create(content);
 
-        if (contentAdded) {
-            res.status(200).json({ contentAdded });
-            return
+        if (!contentAdded) {
+            res.status(500).json({ message: "Failed to save content." });
+            return;
         }
 
+        // 🔁 Route to correct indexer logic
+        if (content.type === "tweet") {
+            const tweetId = extractTweetId(content.link);
+            if (!tweetId) {
+                res.status(400).json({ message: "Invalid tweet URL" });
+                return;
+            }
+
+            const { textChunks, metadata } = await fetchSingleTweetContent(tweetId);
+            const CHUNK_SIZE = 100;
+            const allChunks: string[] = [];
+
+            for (const text of textChunks) {
+                const words = text.split(/\s+/);
+                for (let i = 0; i < words.length; i += CHUNK_SIZE) {
+                    allChunks.push(words.slice(i, i + CHUNK_SIZE).join(" "));
+                }
+            }
+
+            const embeddingRes = await axios.post("http://127.0.0.1:5000/embed", {
+                texts: allChunks
+            });
+
+            const embeddings = embeddingRes.data.embeddings;
+
+            const records = allChunks.map((text, i) => ({
+                text,
+                vector: embeddings[i],
+                title: content.title
+            }));
+
+            await client.insert({
+                collection_name: "embeddings",
+                data: records
+            });
+
+        } else if (content.type === "youtube") {
+            const videoIdMatch = content.link.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
+            const videoId = videoIdMatch?.[1];
+
+            if (!videoId) {
+                res.status(400).json({ message: "Invalid YouTube URL" });
+                return;
+            }
+
+            const transcript = await YoutubeTranscript.fetchTranscript(videoId);
+            console.log("transcript: " + transcript)
+            const fullText = transcript.map(entry => entry.text).join(" ");
+
+            const words = fullText.split(/\s+/);
+            const chunkSize = 1000;
+            const chunks: string[] = [];
+
+            for (let i = 0; i < words.length; i += chunkSize) {
+                chunks.push(words.slice(i, i + chunkSize).join(" "));
+            }
+
+            const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
+                texts: chunks
+            });
+
+            const chunkEmbeddings = embedRes.data.embeddings;
+
+            const records = chunks.map((chunk, idx) => ({
+                text: chunk,
+                vector: chunkEmbeddings[idx],
+                title: content.title
+            }));
+
+            await client.insert({
+                collection_name: "embeddings",
+                data: records
+            });
+        }
+
+        res.status(200).json({ contentAdded, message: `${content.type} indexed and stored.` });
+
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Something went wrong." });
-        return
+        console.error("Error in /api/v1/content:", error);
+        res.status(500).json({ error: "Something went wrong during content indexing." });
     }
 });
+
 
 app.get("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest, res) => {
     try {
