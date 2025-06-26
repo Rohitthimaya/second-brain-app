@@ -1,11 +1,20 @@
-import mongoose from "mongoose";
+import mongoose, { Types } from "mongoose";
 import { boolean } from "zod";
 
-const userSchemaDB = new mongoose.Schema({
+export interface IUser extends Document {
+  username: string;
+  password?: string;
+  googleId?: string;
+  shared: boolean;
+  _id: Types.ObjectId;
+}
+
+const userSchemaDB = new mongoose.Schema<IUser>({
     username: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
-    shared: { type: Boolean, required: true  }
+    password: { type: String, required: false },
+    shared: { type: Boolean, required: true  },
+    googleId: { type: String, unique: true, sparse: true },
 })
 
-const User = mongoose.model("User", userSchemaDB);
+const User = mongoose.model<IUser>("User", userSchemaDB);
 export default User;

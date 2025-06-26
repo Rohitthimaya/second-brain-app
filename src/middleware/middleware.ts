@@ -15,7 +15,7 @@ export interface AuthenticatedRequest extends Request {
 }
 
 export const authenticateToken = (
-  req: AuthenticatedRequest,
+  req: Request,
   res: Response,
   next: NextFunction
 ): void => {

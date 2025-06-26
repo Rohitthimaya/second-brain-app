@@ -1,7 +1,7 @@
 import express from "express";
 import { userSchema, userSchemaTs } from "./validations/uservalidation";
 import { connectDB } from "./db/db"
-import User from "./db/schemas/userSchema";
+import User, { IUser } from "./db/schemas/userSchema";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import * as dotenv from "dotenv";
@@ -21,13 +21,16 @@ import { TwitterApi } from 'twitter-api-v2';
 import { YoutubeTranscript } from "youtube-transcript";
 import cors from "cors";
 
+dotenv.config();
+
+const { OAuth2Client } = require('google-auth-library');
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
 
-dotenv.config();
 connectDB()
 
 // Replace with your Bearer Token from https://developer.twitter.com
@@ -37,6 +40,47 @@ const address = `${process.env.address}`;
 const token = `${process.env.token}`
 // connect to milvus
 const client = new MilvusClient({ address, token });
+
+app.post('/auth/google', async (req, res) => {
+    const { idToken } = req.body;
+
+    try {
+        const ticket = await googleClient.verifyIdToken({
+            idToken,
+            audience: process.env.GOOGLE_CLIENT_ID,
+        });
+
+        const payload = ticket.getPayload();
+        const { email, sub: googleId } = payload;
+
+        if (!email) {
+            res.status(400).json({ message: "Email is required from Google token." });
+            return
+        }
+
+        // Check if user exists
+        let user = await User.findOne({ username: email });
+
+        // If not, create new user with no password
+        if (!user) {
+            user = await User.create({
+                username: email,
+                password: null, // Or you can omit this field
+                shared: false,
+                googleId, // Optional: store for reference
+                // name      // Optional: store full name
+            });
+        }
+
+        const token = jwt.sign({ id: user._id, username: user.username }, `${process.env.SECRET_KEY}`, { expiresIn: '1d' })
+
+        res.status(200).json({ message: "Authentication successful", token: token });
+
+    } catch (error) {
+        console.error("Error verifying ID token:", error);
+        res.status(401).json({ message: "Authentication failed" });
+    }
+});
 
 
 // Sign Up
@@ -105,6 +149,10 @@ app.post("/api/v1/signin", async (req, res) => {
             return;
         }
 
+        if (!userExist.password) {
+            res.status(500).json({ message: "User password is missing." });
+            return;
+        }
         const isPasswordCorrect = await bcrypt.compare(password, userExist.password);
 
         if (!isPasswordCorrect) {
@@ -307,9 +355,10 @@ async function fetchSingleTweetContent(tweetId: string): Promise<{ textChunks: s
     };
 }
 
-app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest, res) => {
+app.post("/api/v1/content", authenticateToken, async (req, res) => {
     try {
-        const user = req.user;
+        const { user } = req as AuthenticatedRequest;
+
         const content = {
             type: req.body.type,
             link: req.body.link,
@@ -324,26 +373,23 @@ app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest,
             res.status(400).json({
                 error: parsedContent.error.flatten().fieldErrors,
             });
-            return;
+            return
         }
 
-        // Save content to DB
         const contentAdded = await Content.create(content);
-
         if (!contentAdded) {
             res.status(500).json({ message: "Failed to save content." });
-            return;
+            return
         }
 
-        // 🔁 Route to correct indexer logic
         if (content.type === "tweet") {
             const tweetId = extractTweetId(content.link);
             if (!tweetId) {
                 res.status(400).json({ message: "Invalid tweet URL" });
-                return;
+                return
             }
 
-            const { textChunks, metadata } = await fetchSingleTweetContent(tweetId);
+            const { textChunks } = await fetchSingleTweetContent(tweetId);
             const CHUNK_SIZE = 100;
             const allChunks: string[] = [];
 
@@ -372,42 +418,63 @@ app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest,
             });
 
         } else if (content.type === "youtube") {
-            const videoIdMatch = content.link.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
+            const videoIdMatch = content.link.match(/(?:v=|\/|be\/|embed\/)([0-9A-Za-z_-]{11})/);
             const videoId = videoIdMatch?.[1];
 
             if (!videoId) {
+                console.error("❌ Invalid YouTube URL:", content.link);
                 res.status(400).json({ message: "Invalid YouTube URL" });
-                return;
+                return
             }
 
-            const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-            console.log("transcript: " + transcript)
-            const fullText = transcript.map(entry => entry.text).join(" ");
+            try {
+                console.log("📺 Fetching transcript from Supadata for videoId:", videoId);
 
-            const words = fullText.split(/\s+/);
-            const chunkSize = 1000;
-            const chunks: string[] = [];
+                const transcriptRes = await axios.get(`https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`, {
+                    headers: {
+                        'x-api-key': process.env.SUPA_YOUTUBE_API
+                    }
+                });
+                const transcriptData = transcriptRes.data;
 
-            for (let i = 0; i < words.length; i += chunkSize) {
-                chunks.push(words.slice(i, i + chunkSize).join(" "));
+                if (!transcriptData || !Array.isArray(transcriptData.content) || transcriptData.content.length === 0) {
+                    console.warn("⚠️ Supadata returned empty transcript.");
+                    res.status(404).json({ message: "Transcript not available for this video." });
+                    return
+                }
+
+                const fullText = transcriptData.content.map((entry: { text: any; }) => entry.text).join(" ");
+
+                const words = fullText.split(/\s+/);
+                const chunkSize = 1000;
+                const chunks: string[] = [];
+
+                for (let i = 0; i < words.length; i += chunkSize) {
+                    chunks.push(words.slice(i, i + chunkSize).join(" "));
+                }
+
+                const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
+                    texts: chunks
+                });
+
+                const chunkEmbeddings = embedRes.data.embeddings;
+
+                const records = chunks.map((chunk, idx) => ({
+                    text: chunk,
+                    vector: chunkEmbeddings[idx],
+                    title: content.title
+                }));
+
+                await client.insert({
+                    collection_name: "embeddings",
+                    data: records
+                });
+
+            } catch (err) {
+                console.error("❌ Supadata fetch failed:", (err as any)?.response?.data || err);
+                res.status(500).json({ message: "Failed to fetch transcript from Supadata." });
+                return
             }
-
-            const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
-                texts: chunks
-            });
-
-            const chunkEmbeddings = embedRes.data.embeddings;
-
-            const records = chunks.map((chunk, idx) => ({
-                text: chunk,
-                vector: chunkEmbeddings[idx],
-                title: content.title
-            }));
-
-            await client.insert({
-                collection_name: "embeddings",
-                data: records
-            });
         }
 
         res.status(200).json({ contentAdded, message: `${content.type} indexed and stored.` });
@@ -419,9 +486,11 @@ app.post("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest,
 });
 
 
-app.get("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest, res) => {
+
+app.get("/api/v1/content", authenticateToken, async (req, res) => {
     try {
-        const user = req.user;
+        // const user = req.user;
+        const user = (req as AuthenticatedRequest).user;
 
         const userContent = await Content.find({ userId: user?.id }).populate("userId", "username")
 
@@ -437,10 +506,11 @@ app.get("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest, 
     }
 })
 
-app.delete("/api/v1/content", authenticateToken, async (req: AuthenticatedRequest, res) => {
+app.delete("/api/v1/content", authenticateToken, async (req, res) => {
     try {
+        const { user } = req as AuthenticatedRequest;
         const contentId = req.body.contentId;
-        const deleted = await Content.deleteOne({ _id: contentId, userId: req.user?.id })
+        const deleted = await Content.deleteOne({ _id: contentId, userId: user?.id })
         if (deleted) {
             res.status(200).json({ message: "Content Deleted" });
             return
@@ -452,32 +522,33 @@ app.delete("/api/v1/content", authenticateToken, async (req: AuthenticatedReques
     }
 })
 
-app.post("/api/v1/brain/share", authenticateToken, async (req: AuthenticatedRequest, res) => {
+app.post("/api/v1/brain/share", authenticateToken, async (req, res) => {
     try {
+        const { user } = req as AuthenticatedRequest;
         const share = req.body.share;
         if (share) {
             const existing = await Link.findOne({
-                userId: req.user?.id
+                userId: user?.id
             })
 
-            if(existing){
+            if (existing) {
                 res.status(200).json({
                     hash: existing.hash
                 })
                 return
             }
-            
+
             const hash = random(10)
 
             await Link.create({
-                userId: req.user?.id,
+                userId: user?.id,
                 hash: hash
             })
 
             res.status(200).json({ message: "/share/" + hash })
             return
         } else {
-            await Link.deleteOne({ userId: req.user?.id })
+            await Link.deleteOne({ userId: user?.id })
             res.status(200).json({ message: "Share disabled!" })
             return
         }
@@ -488,7 +559,7 @@ app.post("/api/v1/brain/share", authenticateToken, async (req: AuthenticatedRequ
     }
 })
 
-app.get("/api/v1/brain/:shareLink", authenticateToken, async (req: AuthenticatedRequest, res) => {
+app.get("/api/v1/brain/:shareLink", authenticateToken, async (req, res) => {
     try {
         const hash = req.params.shareLink;
 

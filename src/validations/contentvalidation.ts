@@ -16,7 +16,7 @@ const ContentTypesEnum = z.enum([
 // Define the Zod schema
 const contentSchema = z.object({
   type: ContentTypesEnum,
-  link: z.string().url(),         // You can use .url() if you expect valid URLs
+  link: z.string(),         // You can use .url() if you expect valid URLs
   title: z.string(),
   tags: z.array(z.string()).optional(),      // Mongoose ObjectIds are strings, so use z.string()
   userId: z.string(),             // Also an ObjectId
