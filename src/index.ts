@@ -18,8 +18,10 @@ import pdfParse from 'pdf-parse';
 import axios from "axios";
 import { MilvusClient, DataType } from '@zilliz/milvus2-sdk-node';
 import { TwitterApi } from 'twitter-api-v2';
-import { YoutubeTranscript } from "youtube-transcript";
+import AWS from "aws-sdk";
+// import { YoutubeTranscript } from "youtube-transcript";
 import cors from "cors";
+import { text } from "body-parser";
 
 dotenv.config();
 
@@ -29,6 +31,12 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
+
+const s3 = new AWS.S3({
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    region: process.env.AWS_REGION
+});
 
 
 connectDB()
@@ -187,17 +195,20 @@ const storage = multer.diskStorage({
     }
 });
 
-const upload = multer({
-    storage: storage,
-    fileFilter: (req, file, cb) => {
-        if (file.mimetype !== 'application/pdf') {
-            return cb(null, false);
-        }
-        cb(null, true);
-    }
-});
+// const upload = multer({
+//     storage: storage,
+//     fileFilter: (req, file, cb) => {
+//         if (file.mimetype !== 'application/pdf') {
+//             return cb(null, false);
+//         }
+//         cb(null, true);
+//     }
+// });
+const upload = multer({ storage: multer.memoryStorage() });
 
-app.post("/pdf/index", upload.single('file'), async (req, res) => {
+app.post("/pdf/index", authenticateToken, upload.single('file'), async (req, res) => {
+    const { user } = req as AuthenticatedRequest;
+
     // TODO1: Get the pdf file
     const pdfFilePath = req.file?.path;
     const pdfFileName = req.file?.filename;
@@ -239,6 +250,7 @@ app.post("/pdf/index", upload.single('file'), async (req, res) => {
     const records = chunks.map((chunk, idx) => ({
         text: chunk,
         vector: chunkEmbeddings[idx],
+        userId: user?.id
     }));
 
     // Insert into Milvus
@@ -260,9 +272,10 @@ app.post("/pdf/index", upload.single('file'), async (req, res) => {
     return
 })
 
-app.post("/query", async (req, res) => {
+app.post("/query", authenticateToken, async (req, res) => {
     try {
         const { query } = req.body;
+        const { user } = req as AuthenticatedRequest;
 
         if (!query) {
             res.status(400).json({ message: "Query required" });
@@ -282,6 +295,7 @@ app.post("/query", async (req, res) => {
             vector: queryEmbedding,
             limit: 5,
             output_fields: ["text", "title"],
+            filter: `userId == "${user?.id}"`,
             params: {
                 anns_field: "vector",
                 topk: "5",
@@ -355,136 +369,313 @@ async function fetchSingleTweetContent(tweetId: string): Promise<{ textChunks: s
     };
 }
 
-app.post("/api/v1/content", authenticateToken, async (req, res) => {
+// app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req, res) => {
+//     try {
+//         const { user } = req as AuthenticatedRequest;
+
+//         if(req.body.type == "pdf"){
+//             try {
+//                 const { title, type } = req.body;
+//                 const file = req.file;
+        
+//                 let s3Url = "";
+        
+//                 if (type === "pdf" && file) {
+//                     const s3Res = await s3.upload({
+//                         Bucket: `${process.env.S3_BUCKET_NAME}`,
+//                         Key: `pdfs/${Date.now()}_${file.originalname}`,
+//                         Body: file.buffer,
+//                         ContentType: file.mimetype,
+//                         ACL: "public-read"
+//                     }).promise();
+        
+//                     s3Url = s3Res.Location;
+//                 }
+        
+//                 const newContent = await Content.create({
+//                     title,
+//                     type,
+//                     link: s3Url,
+//                     userId: user?.id
+//                 });
+        
+//                 res.status(200).json({ message: "Content added", content: newContent });
+//                 return
+        
+//             } catch (err) {
+//                 console.error("Upload failed:", err);
+//                 res.status(500).json({ error: "Upload failed." });
+//                 return
+//             }
+//         }
+
+//         console.log("Content-Type:", req.headers['content-type']);
+//         console.log("Body received:", req.body);
+
+//         const content = {
+//             type: req.body.type,
+//             link: req.body.link,
+//             title: req.body.title,
+//             tags: req.body.tags,
+//             userId: user?.id,
+//         };
+
+//         const parsedContent = contentSchema.safeParse(content);
+
+//         if (!parsedContent.success) {
+//             res.status(400).json({
+//                 error: parsedContent.error.flatten().fieldErrors,
+//             });
+//             return
+//         }
+
+//         const contentAdded = await Content.create(content);
+
+//         if (!contentAdded) {
+//             res.status(500).json({ message: "Failed to save content." });
+//             return
+//         }
+
+//         if (content.type === "tweet") {
+//             const tweetId = extractTweetId(content.link);
+//             if (!tweetId) {
+//                 res.status(400).json({ message: "Invalid tweet URL" });
+//                 return
+//             }
+
+//             const { textChunks } = await fetchSingleTweetContent(tweetId);
+//             const CHUNK_SIZE = 100;
+//             const allChunks: string[] = [];
+
+//             for (const text of textChunks) {
+//                 const words = text.split(/\s+/);
+//                 for (let i = 0; i < words.length; i += CHUNK_SIZE) {
+//                     allChunks.push(words.slice(i, i + CHUNK_SIZE).join(" "));
+//                 }
+//             }
+
+//             const embeddingRes = await axios.post("http://127.0.0.1:5000/embed", {
+//                 texts: allChunks
+//             });
+
+//             const embeddings = embeddingRes.data.embeddings;
+
+//             const records = allChunks.map((text, i) => ({
+//                 text,
+//                 vector: embeddings[i],
+//                 title: content.title,
+//                 userId: user?.id,
+//                 contentId: contentAdded._id
+//             }));
+
+//             await client.insert({
+//                 collection_name: "embeddings",
+//                 data: records
+//             });
+
+//         } else if (content.type === "youtube") {
+//             const videoIdMatch = content.link.match(/(?:v=|\/|be\/|embed\/)([0-9A-Za-z_-]{11})/);
+//             const videoId = videoIdMatch?.[1];
+
+//             if (!videoId) {
+//                 console.error("❌ Invalid YouTube URL:", content.link);
+//                 res.status(400).json({ message: "Invalid YouTube URL" });
+//                 return
+//             }
+
+//             try {
+//                 console.log("📺 Fetching transcript from Supadata for videoId:", videoId);
+
+//                 const transcriptRes = await axios.get(`https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`, {
+//                     headers: {
+//                         'x-api-key': process.env.SUPA_YOUTUBE_API
+//                     }
+//                 });
+//                 const transcriptData = transcriptRes.data;
+
+//                 if (!transcriptData || !Array.isArray(transcriptData.content) || transcriptData.content.length === 0) {
+//                     console.warn("⚠️ Supadata returned empty transcript.");
+//                     res.status(404).json({ message: "Transcript not available for this video." });
+//                     return
+//                 }
+
+//                 const fullText = transcriptData.content.map((entry: { text: any; }) => entry.text).join(" ");
+
+//                 const words = fullText.split(/\s+/);
+//                 const chunkSize = 1000;
+//                 const chunks: string[] = [];
+
+//                 for (let i = 0; i < words.length; i += chunkSize) {
+//                     chunks.push(words.slice(i, i + chunkSize).join(" "));
+//                 }
+
+//                 const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
+//                     texts: chunks
+//                 });
+
+//                 const chunkEmbeddings = embedRes.data.embeddings;
+
+//                 const records = chunks.map((chunk, idx) => ({
+//                     text: chunk,
+//                     vector: chunkEmbeddings[idx],
+//                     title: content.title,
+//                     userId: user?.id,
+//                     contentId: contentAdded._id
+//                 }));
+
+//                 await client.insert({
+//                     collection_name: "embeddings",
+//                     data: records
+//                 });
+
+//             } catch (err) {
+//                 console.error("❌ Supadata fetch failed:", (err as any)?.response?.data || err);
+//                 res.status(500).json({ message: "Failed to fetch transcript from Supadata." });
+//                 return
+//             }
+//         }
+
+//         res.status(200).json({ contentAdded, message: ` indexed and stored.` });
+
+//     } catch (error) {
+//         console.error("Error in /api/v1/content:", error);
+//         res.status(500).json({ error: "Something went wrong during content indexing." });
+//     }
+// });
+
+function extractYouTubeId(url: string) {
+    const match = url.match(/(?:v=|\/|be\/|embed\/)([0-9A-Za-z_-]{11})/);
+    return match?.[1];
+}
+
+async function fetchYouTubeTranscript(videoId: string): Promise<string> {
+    const res = await axios.get(`https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`, {
+        headers: { 'x-api-key': process.env.SUPA_YOUTUBE_API }
+    });
+    const entries = res.data?.content ?? [];
+    return entries.map((e: { text: string }) => e.text).join(" ");
+}
+
+async function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
+    const data = await pdfParse(buffer);
+    return data.text || "";
+}
+
+async function indexChunks(
+    texts: string[],
+    title: string,
+    userId: string | undefined,
+    contentId: string | any,
+    chunkSize = 100
+) {
+    const allChunks: string[] = [];
+    const newText = title + " " + text
+    for (const text of newText) {
+        const words = text.split(/\s+/);
+        for (let i = 0; i < words.length; i += chunkSize) {
+            allChunks.push(words.slice(i, i + chunkSize).join(" "));
+        }
+    }
+
+    const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
+        texts: allChunks
+    });
+
+    const embeddings = embedRes.data.embeddings;
+    const records = allChunks.map((text, idx) => ({
+        text,
+        vector: embeddings[idx],
+        title,
+        userId,
+        contentId
+    }));
+
+    await client.insert({ collection_name: "embeddings", data: records });
+}
+
+app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req, res) => {
     try {
         const { user } = req as AuthenticatedRequest;
+        const { title, type, link = "", tags = [] } = req.body;
+        let finalLink = link;
 
-        const content = {
-            type: req.body.type,
-            link: req.body.link,
-            title: req.body.title,
-            tags: req.body.tags,
-            userId: user?.id
-        };
+        // Handle PDF upload
+        if (type === "pdf" && req.file) {
+            try {
+                const s3Res = await s3.upload({
+                    Bucket: `${process.env.S3_BUCKET_NAME}`,
+                    Key: `pdfs/${Date.now()}_${req.file.originalname}`,
+                    Body: req.file.buffer,
+                    ContentType: req.file.mimetype,
+                    ACL: "public-read"
+                }).promise();
+
+                finalLink = s3Res.Location;
+            } catch (err) {
+                console.error("❌ PDF upload failed:", err);
+                res.status(500).json({ error: "PDF upload failed" });
+                return
+            }
+        }
+
+        const content = { title, type, link: finalLink, tags, userId: user?.id };
 
         const parsedContent = contentSchema.safeParse(content);
-
         if (!parsedContent.success) {
-            res.status(400).json({
-                error: parsedContent.error.flatten().fieldErrors,
-            });
+            res.status(400).json({ error: parsedContent.error.flatten().fieldErrors });
             return
         }
 
         const contentAdded = await Content.create(content);
         if (!contentAdded) {
-            res.status(500).json({ message: "Failed to save content." });
+            res.status(500).json({ message: "Failed to save content" });
             return
         }
 
-        if (content.type === "tweet") {
-            const tweetId = extractTweetId(content.link);
-            if (!tweetId) {
-                res.status(400).json({ message: "Invalid tweet URL" });
-                return
+        // Index based on content type
+        switch (type) {
+            case "tweet": {
+                const tweetId = extractTweetId(finalLink);
+                if (!tweetId){
+                    res.status(400).json({ message: "Invalid tweet URL" });
+                    return
+                } 
+
+                const { textChunks } = await fetchSingleTweetContent(tweetId);
+                await indexChunks(textChunks, content.title, user?.id, contentAdded._id);
+                break;
             }
 
-            const { textChunks } = await fetchSingleTweetContent(tweetId);
-            const CHUNK_SIZE = 100;
-            const allChunks: string[] = [];
-
-            for (const text of textChunks) {
-                const words = text.split(/\s+/);
-                for (let i = 0; i < words.length; i += CHUNK_SIZE) {
-                    allChunks.push(words.slice(i, i + CHUNK_SIZE).join(" "));
-                }
-            }
-
-            const embeddingRes = await axios.post("http://127.0.0.1:5000/embed", {
-                texts: allChunks
-            });
-
-            const embeddings = embeddingRes.data.embeddings;
-
-            const records = allChunks.map((text, i) => ({
-                text,
-                vector: embeddings[i],
-                title: content.title
-            }));
-
-            await client.insert({
-                collection_name: "embeddings",
-                data: records
-            });
-
-        } else if (content.type === "youtube") {
-            const videoIdMatch = content.link.match(/(?:v=|\/|be\/|embed\/)([0-9A-Za-z_-]{11})/);
-            const videoId = videoIdMatch?.[1];
-
-            if (!videoId) {
-                console.error("❌ Invalid YouTube URL:", content.link);
-                res.status(400).json({ message: "Invalid YouTube URL" });
-                return
-            }
-
-            try {
-                console.log("📺 Fetching transcript from Supadata for videoId:", videoId);
-
-                const transcriptRes = await axios.get(`https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`, {
-                    headers: {
-                        'x-api-key': process.env.SUPA_YOUTUBE_API
-                    }
-                });
-                const transcriptData = transcriptRes.data;
-
-                if (!transcriptData || !Array.isArray(transcriptData.content) || transcriptData.content.length === 0) {
-                    console.warn("⚠️ Supadata returned empty transcript.");
-                    res.status(404).json({ message: "Transcript not available for this video." });
+            case "youtube": {
+                const videoId = extractYouTubeId(finalLink);
+                if (!videoId){
+                    res.status(400).json({ message: "Invalid YouTube URL" });
                     return
                 }
 
-                const fullText = transcriptData.content.map((entry: { text: any; }) => entry.text).join(" ");
+                const transcript = await fetchYouTubeTranscript(videoId);
+                await indexChunks([transcript], content.title, user?.id, contentAdded._id, 1000);
+                break;
+            }
 
-                const words = fullText.split(/\s+/);
-                const chunkSize = 1000;
-                const chunks: string[] = [];
-
-                for (let i = 0; i < words.length; i += chunkSize) {
-                    chunks.push(words.slice(i, i + chunkSize).join(" "));
+            case "pdf": {
+                if (!req.file) {
+                    res.status(400).json({ message: "No PDF file uploaded" });
+                    return;
                 }
-
-                const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
-                    texts: chunks
-                });
-
-                const chunkEmbeddings = embedRes.data.embeddings;
-
-                const records = chunks.map((chunk, idx) => ({
-                    text: chunk,
-                    vector: chunkEmbeddings[idx],
-                    title: content.title
-                }));
-
-                await client.insert({
-                    collection_name: "embeddings",
-                    data: records
-                });
-
-            } catch (err) {
-                console.error("❌ Supadata fetch failed:", (err as any)?.response?.data || err);
-                res.status(500).json({ message: "Failed to fetch transcript from Supadata." });
-                return
+                const pdfText = await extractTextFromPdfBuffer(req.file.buffer);
+                await indexChunks([pdfText], content.title, user?.id, contentAdded._id, 1000);
+                break;
             }
         }
 
-        res.status(200).json({ contentAdded, message: `${content.type} indexed and stored.` });
-
+        res.status(200).json({ message: "Content indexed and stored", content: contentAdded });
+        return
     } catch (error) {
-        console.error("Error in /api/v1/content:", error);
-        res.status(500).json({ error: "Something went wrong during content indexing." });
+        console.error("❌ Error in content route:", error);
+        res.status(500).json({ error: "Something went wrong" });
     }
 });
-
 
 
 app.get("/api/v1/content", authenticateToken, async (req, res) => {
@@ -510,17 +701,28 @@ app.delete("/api/v1/content", authenticateToken, async (req, res) => {
     try {
         const { user } = req as AuthenticatedRequest;
         const contentId = req.body.contentId;
-        const deleted = await Content.deleteOne({ _id: contentId, userId: user?.id })
-        if (deleted) {
-            res.status(200).json({ message: "Content Deleted" });
+
+        const deleted = await Content.deleteOne({ _id: contentId, userId: user?.id });
+
+        if (deleted.deletedCount === 1) {
+            await client.deleteEntities({
+                collection_name: "embeddings",
+                filter: `contentId == "${contentId}"`
+            });
+
+            res.status(200).json({ message: "Content and vectors deleted successfully." });
+            return
+        } else {
+            res.status(404).json({ message: "Content not found or unauthorized." });
             return
         }
     } catch (error) {
-        console.error(error);
+        console.error("Error deleting content:", error);
         res.status(500).json({ error: "Something went wrong." });
         return
     }
-})
+});
+
 
 app.post("/api/v1/brain/share", authenticateToken, async (req, res) => {
     try {
