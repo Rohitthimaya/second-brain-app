@@ -794,6 +794,6 @@ app.get("/api/v1/brain/:shareLink", authenticateToken, async (req, res) => {
     }
 })
 
-app.listen(3000, () => {
-    console.log(`App running on port: ${3000}`)
+app.listen(8080, () => {
+    console.log(`App running on port: ${8080}`)
 })
