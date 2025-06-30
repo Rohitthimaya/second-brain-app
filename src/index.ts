@@ -235,7 +235,7 @@ app.post("/pdf/index", authenticateToken, upload.single('file'), async (req, res
     }
 
     // TODO4: Convert each chunck to vector embedding [We will be using SentenceTransformer (python)]
-    const response = await axios.post("http://127.0.0.1:5000/embed", {
+    const response = await axios.post("https://python-embeddings.onrender.com", {
         texts: chunks
     });
 
@@ -282,7 +282,7 @@ app.post("/query", authenticateToken, async (req, res) => {
         }
 
         // Step 1: Get embedding of query
-        const response = await axios.post("http://127.0.0.1:5000/embed", {
+        const response = await axios.post("https://python-embeddings.onrender.com", {
             texts: [query]
         });
 
@@ -577,7 +577,7 @@ async function indexChunks(
         }
     }
 
-    const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
+    const embedRes = await axios.post("https://python-embeddings.onrender.com/embed", {
         texts: allChunks
     });
 
