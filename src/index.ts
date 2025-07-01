@@ -235,9 +235,20 @@ app.post("/pdf/index", authenticateToken, upload.single('file'), async (req, res
     }
 
     // TODO4: Convert each chunck to vector embedding [We will be using SentenceTransformer (python)]
-    const response = await axios.post("https://python-embeddings.onrender.com", {
-        texts: chunks
-    });
+    const response = await axios.post(
+        "https://api.cohere.ai/v1/embed",
+        {
+            texts: chunks,
+            model: "embed-english-v3.0",
+            input_type: "search_document"
+        },
+        {
+            headers: {
+                "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+                "Content-Type": "application/json"
+            }
+        }
+    );    
 
     const chunkEmbeddings = response.data.embeddings;
 
@@ -282,9 +293,21 @@ app.post("/query", authenticateToken, async (req, res) => {
         }
 
         // Step 1: Get embedding of query
-        const response = await axios.post("https://python-embeddings.onrender.com", {
-            texts: [query]
-        });
+        const response = await axios.post(
+            "https://api.cohere.ai/v1/embed",
+            {
+                texts: [query],
+                model: "embed-english-v3.0",
+                input_type: "search_document"
+            },
+            {
+                headers: {
+                    "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+                    "Content-Type": "application/json"
+                }
+            }
+        );
+        
 
         const queryEmbedding = response.data.embeddings[0];
         console.log("Query embedding:", queryEmbedding);
@@ -293,12 +316,12 @@ app.post("/query", authenticateToken, async (req, res) => {
         const searchResult = await client.search({
             collection_name: "embeddings",
             vector: queryEmbedding,
-            limit: 5,
+            // limit: 2,
             output_fields: ["text", "title"],
             filter: `userId == "${user?.id}"`,
             params: {
                 anns_field: "vector",
-                topk: "5",
+                topk: 2,
                 metric_type: "COSINE", // or "IP" or "COSINE"
                 params: JSON.stringify({ nprobe: 10 }),
             },
@@ -316,13 +339,39 @@ app.post("/query", authenticateToken, async (req, res) => {
         console.log("Top context chunks:\n", context);
 
         // Step 3: Ask LLaMA 3 via Ollama
-        const llamaResponse = await axios.post("http://localhost:11434/api/generate", {
-            model: "llama3",
-            prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`,
-            stream: false
-        });
+        // const llamaResponse = await axios.post("http://localhost:11434/api/generate", {
+        //     model: "llama3",
+        //     prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`,
+        //     stream: false
+        // });
 
-        const answer = llamaResponse.data.response;
+        // const answer = llamaResponse.data.response;
+
+
+        const aimlResponse = await axios.post(
+            "https://api.aimlapi.com/v1/chat/completions",
+            {
+                model: "gpt-3.5-turbo",
+                messages: [
+                    {
+                        role: "user",
+                        content: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`
+                    }
+                ],
+                max_tokens: 500,
+                temperature: 0.7
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.AIMLAPI_KEY}`,
+                    "Content-Type": "application/json"
+                }
+            }
+        );
+        
+        const answer = aimlResponse.data.choices[0].message.content;
+        
+        console.log(JSON.stringify(aimlResponse.data, null, 2));       
 
         res.json({
             answer,
@@ -369,180 +418,6 @@ async function fetchSingleTweetContent(tweetId: string): Promise<{ textChunks: s
     };
 }
 
-// app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req, res) => {
-//     try {
-//         const { user } = req as AuthenticatedRequest;
-
-//         if(req.body.type == "pdf"){
-//             try {
-//                 const { title, type } = req.body;
-//                 const file = req.file;
-        
-//                 let s3Url = "";
-        
-//                 if (type === "pdf" && file) {
-//                     const s3Res = await s3.upload({
-//                         Bucket: `${process.env.S3_BUCKET_NAME}`,
-//                         Key: `pdfs/${Date.now()}_${file.originalname}`,
-//                         Body: file.buffer,
-//                         ContentType: file.mimetype,
-//                         ACL: "public-read"
-//                     }).promise();
-        
-//                     s3Url = s3Res.Location;
-//                 }
-        
-//                 const newContent = await Content.create({
-//                     title,
-//                     type,
-//                     link: s3Url,
-//                     userId: user?.id
-//                 });
-        
-//                 res.status(200).json({ message: "Content added", content: newContent });
-//                 return
-        
-//             } catch (err) {
-//                 console.error("Upload failed:", err);
-//                 res.status(500).json({ error: "Upload failed." });
-//                 return
-//             }
-//         }
-
-//         console.log("Content-Type:", req.headers['content-type']);
-//         console.log("Body received:", req.body);
-
-//         const content = {
-//             type: req.body.type,
-//             link: req.body.link,
-//             title: req.body.title,
-//             tags: req.body.tags,
-//             userId: user?.id,
-//         };
-
-//         const parsedContent = contentSchema.safeParse(content);
-
-//         if (!parsedContent.success) {
-//             res.status(400).json({
-//                 error: parsedContent.error.flatten().fieldErrors,
-//             });
-//             return
-//         }
-
-//         const contentAdded = await Content.create(content);
-
-//         if (!contentAdded) {
-//             res.status(500).json({ message: "Failed to save content." });
-//             return
-//         }
-
-//         if (content.type === "tweet") {
-//             const tweetId = extractTweetId(content.link);
-//             if (!tweetId) {
-//                 res.status(400).json({ message: "Invalid tweet URL" });
-//                 return
-//             }
-
-//             const { textChunks } = await fetchSingleTweetContent(tweetId);
-//             const CHUNK_SIZE = 100;
-//             const allChunks: string[] = [];
-
-//             for (const text of textChunks) {
-//                 const words = text.split(/\s+/);
-//                 for (let i = 0; i < words.length; i += CHUNK_SIZE) {
-//                     allChunks.push(words.slice(i, i + CHUNK_SIZE).join(" "));
-//                 }
-//             }
-
-//             const embeddingRes = await axios.post("http://127.0.0.1:5000/embed", {
-//                 texts: allChunks
-//             });
-
-//             const embeddings = embeddingRes.data.embeddings;
-
-//             const records = allChunks.map((text, i) => ({
-//                 text,
-//                 vector: embeddings[i],
-//                 title: content.title,
-//                 userId: user?.id,
-//                 contentId: contentAdded._id
-//             }));
-
-//             await client.insert({
-//                 collection_name: "embeddings",
-//                 data: records
-//             });
-
-//         } else if (content.type === "youtube") {
-//             const videoIdMatch = content.link.match(/(?:v=|\/|be\/|embed\/)([0-9A-Za-z_-]{11})/);
-//             const videoId = videoIdMatch?.[1];
-
-//             if (!videoId) {
-//                 console.error("❌ Invalid YouTube URL:", content.link);
-//                 res.status(400).json({ message: "Invalid YouTube URL" });
-//                 return
-//             }
-
-//             try {
-//                 console.log("📺 Fetching transcript from Supadata for videoId:", videoId);
-
-//                 const transcriptRes = await axios.get(`https://api.supadata.ai/v1/youtube/transcript?videoId=${videoId}`, {
-//                     headers: {
-//                         'x-api-key': process.env.SUPA_YOUTUBE_API
-//                     }
-//                 });
-//                 const transcriptData = transcriptRes.data;
-
-//                 if (!transcriptData || !Array.isArray(transcriptData.content) || transcriptData.content.length === 0) {
-//                     console.warn("⚠️ Supadata returned empty transcript.");
-//                     res.status(404).json({ message: "Transcript not available for this video." });
-//                     return
-//                 }
-
-//                 const fullText = transcriptData.content.map((entry: { text: any; }) => entry.text).join(" ");
-
-//                 const words = fullText.split(/\s+/);
-//                 const chunkSize = 1000;
-//                 const chunks: string[] = [];
-
-//                 for (let i = 0; i < words.length; i += chunkSize) {
-//                     chunks.push(words.slice(i, i + chunkSize).join(" "));
-//                 }
-
-//                 const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
-//                     texts: chunks
-//                 });
-
-//                 const chunkEmbeddings = embedRes.data.embeddings;
-
-//                 const records = chunks.map((chunk, idx) => ({
-//                     text: chunk,
-//                     vector: chunkEmbeddings[idx],
-//                     title: content.title,
-//                     userId: user?.id,
-//                     contentId: contentAdded._id
-//                 }));
-
-//                 await client.insert({
-//                     collection_name: "embeddings",
-//                     data: records
-//                 });
-
-//             } catch (err) {
-//                 console.error("❌ Supadata fetch failed:", (err as any)?.response?.data || err);
-//                 res.status(500).json({ message: "Failed to fetch transcript from Supadata." });
-//                 return
-//             }
-//         }
-
-//         res.status(200).json({ contentAdded, message: ` indexed and stored.` });
-
-//     } catch (error) {
-//         console.error("Error in /api/v1/content:", error);
-//         res.status(500).json({ error: "Something went wrong during content indexing." });
-//     }
-// });
-
 function extractYouTubeId(url: string) {
     const match = url.match(/(?:v=|\/|be\/|embed\/)([0-9A-Za-z_-]{11})/);
     return match?.[1];
@@ -562,28 +437,41 @@ async function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
 }
 
 async function indexChunks(
-    texts: string[],
+    texts: string[],   // array of full texts
     title: string,
     userId: string | undefined,
     contentId: string | any,
     chunkSize = 100
 ) {
     const allChunks: string[] = [];
-    const newText = title + " " + text
-    for (const text of newText) {
+
+    for (const text of texts) {      // loop over each full text string
         const words = text.split(/\s+/);
         for (let i = 0; i < words.length; i += chunkSize) {
             allChunks.push(words.slice(i, i + chunkSize).join(" "));
         }
     }
 
-    const embedRes = await axios.post("https://python-embeddings.onrender.com/embed", {
-        texts: allChunks
-    });
+    // Now allChunks is an array of text chunks, ready to send
+
+    const embedRes = await axios.post(
+        "https://api.cohere.ai/v1/embed",
+        {
+            texts: allChunks,
+            model: "embed-english-v3.0",
+            input_type: "search_document"
+        },
+        {
+            headers: {
+                "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+                "Content-Type": "application/json"
+            }
+        }
+    );
 
     const embeddings = embedRes.data.embeddings;
-    const records = allChunks.map((text, idx) => ({
-        text,
+    const records = allChunks.map((chunkText, idx) => ({
+        text: chunkText,
         vector: embeddings[idx],
         title,
         userId,
@@ -592,6 +480,7 @@ async function indexChunks(
 
     await client.insert({ collection_name: "embeddings", data: records });
 }
+
 
 app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req, res) => {
     try {
@@ -666,6 +555,10 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
                 const pdfText = await extractTextFromPdfBuffer(req.file.buffer);
                 await indexChunks([pdfText], content.title, user?.id, contentAdded._id, 1000);
                 break;
+            }
+
+            case "note": {
+                
             }
         }
 
@@ -794,6 +687,6 @@ app.get("/api/v1/brain/:shareLink", authenticateToken, async (req, res) => {
     }
 })
 
-app.listen(8080, () => {
+app.listen(3000, () => {
     console.log(`App running on port: ${8080}`)
 })
