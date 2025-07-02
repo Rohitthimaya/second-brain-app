@@ -10,7 +10,9 @@ const ContentTypesEnum = z.enum([
   "video",
   "article",
   "audio",
-  "pdf"
+  "pdf",
+  "docx",
+  "pptx"
 ]);
 
 // Define the Zod schema

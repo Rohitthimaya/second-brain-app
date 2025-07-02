@@ -1,4 +1,5 @@
 import express from "express";
+import mammoth from "mammoth";
 import { userSchema, userSchemaTs } from "./validations/uservalidation";
 import { connectDB } from "./db/db"
 import User, { IUser } from "./db/schemas/userSchema";
@@ -205,6 +206,7 @@ const storage = multer.diskStorage({
 //     }
 // });
 const upload = multer({ storage: multer.memoryStorage() });
+
 
 app.post("/pdf/index", authenticateToken, upload.single('file'), async (req, res) => {
     const { user } = req as AuthenticatedRequest;
@@ -443,6 +445,16 @@ async function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
     return data.text || "";
 }
 
+async function extractTextFromDocxBuffer(buffer: Buffer): Promise<string> {
+    try {
+        const result = await mammoth.extractRawText({ buffer });
+        return result.value;
+    } catch (err) {
+        console.error("❌ Error extracting .docx text:", err);
+        return "";
+    }
+}
+
 async function indexChunks(
     texts: string[],   // array of full texts
     title: string,
@@ -502,7 +514,7 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
         let finalLink = link;
 
         // Handle PDF upload
-        if (type === "pdf" && req.file) {
+        if ((type === "pdf" || type === "docx" || type === "pptx") && req.file) {
             try {
                 const s3Res = await s3.upload({
                     Bucket: `${process.env.S3_BUCKET_NAME}`,
@@ -521,7 +533,7 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
         }
 
         const content = { title, type, link: finalLink, tags, userId: user?.id };
-
+        console.log(content)
         const parsedContent = contentSchema.safeParse(content);
         if (!parsedContent.success) {
             res.status(400).json({ error: parsedContent.error.flatten().fieldErrors });
@@ -569,7 +581,23 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
                 await indexChunks([pdfText], content.title, user?.id, contentAdded._id, 1000);
                 break;
             }
-
+            case "docx": {
+                if (!req.file) {
+                    res.status(400).json({ message: "No DOCX file uploaded" });
+                    return;
+                }
+            
+                try {
+                    const docxText = await extractTextFromDocxBuffer(req.file.buffer);
+                    await indexChunks([docxText], content.title, user?.id, contentAdded._id, 1000);
+                } catch (err) {
+                    console.error("❌ DOCX processing failed:", err);
+                    res.status(500).json({ error: "DOCX upload or processing failed" });
+                    return;
+                }
+            
+                break;
+            }          
             case "note": {
                 
             }

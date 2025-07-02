@@ -9,7 +9,9 @@ enum ContentTypes {
     "video",
     "article",
     "audio",
-    "pdf"
+    "pdf",
+    "docx",
+    "pptx"
 }
 
 const contentSchemaDB = new mongoose.Schema({
