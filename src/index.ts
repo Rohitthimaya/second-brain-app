@@ -235,20 +235,24 @@ app.post("/pdf/index", authenticateToken, upload.single('file'), async (req, res
     }
 
     // TODO4: Convert each chunck to vector embedding [We will be using SentenceTransformer (python)]
-    const response = await axios.post(
-        "https://api.cohere.ai/v1/embed",
-        {
-            texts: chunks,
-            model: "embed-english-v3.0",
-            input_type: "search_document"
-        },
-        {
-            headers: {
-                "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
-                "Content-Type": "application/json"
-            }
-        }
-    );    
+    // const response = await axios.post(
+    //     "https://api.cohere.ai/v1/embed",
+    //     {
+    //         texts: chunks,
+    //         model: "embed-english-v3.0",
+    //         input_type: "search_document"
+    //     },
+    //     {
+    //         headers: {
+    //             "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+    //             "Content-Type": "application/json"
+    //         }
+    //     }
+    // ); 
+    
+    const response = await axios.post("http://127.0.0.1:5000/embed", {
+        texts: chunks
+    });
 
     const chunkEmbeddings = response.data.embeddings;
 
@@ -293,22 +297,25 @@ app.post("/query", authenticateToken, async (req, res) => {
         }
 
         // Step 1: Get embedding of query
-        const response = await axios.post(
-            "https://api.cohere.ai/v1/embed",
-            {
-                texts: [query],
-                model: "embed-english-v3.0",
-                input_type: "search_document"
-            },
-            {
-                headers: {
-                    "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
-                    "Content-Type": "application/json"
-                }
-            }
-        );
-        
+        // const response = await axios.post(
+        //     "https://api.cohere.ai/v1/embed",
+        //     {
+        //         texts: [query],
+        //         model: "embed-english-v3.0",
+        //         input_type: "search_document"
+        //     },
+        //     {
+        //         headers: {
+        //             "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+        //             "Content-Type": "application/json"
+        //         }
+        //     }
+        // );
 
+        const response = await axios.post("http://127.0.0.1:5000/embed", {
+            texts: [query]
+        });
+        
         const queryEmbedding = response.data.embeddings[0];
         console.log("Query embedding:", queryEmbedding);
 
@@ -316,20 +323,20 @@ app.post("/query", authenticateToken, async (req, res) => {
         const searchResult = await client.search({
             collection_name: "embeddings",
             vector: queryEmbedding,
-            // limit: 2,
+            limit: 3,
             output_fields: ["text", "title"],
             filter: `userId == "${user?.id}"`,
             params: {
                 anns_field: "vector",
-                topk: 2,
+                topk: 3,
                 metric_type: "COSINE", // or "IP" or "COSINE"
                 params: JSON.stringify({ nprobe: 10 }),
             },
         });
 
+        console.log(searchResult)
 
         const title = searchResult.results[0].title;
-        console.log(title)
 
         const relevantText = searchResult.results.map(hit => hit.text);
         const context = relevantText.join("\n\n");
@@ -339,39 +346,39 @@ app.post("/query", authenticateToken, async (req, res) => {
         console.log("Top context chunks:\n", context);
 
         // Step 3: Ask LLaMA 3 via Ollama
-        // const llamaResponse = await axios.post("http://localhost:11434/api/generate", {
-        //     model: "llama3",
-        //     prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`,
-        //     stream: false
-        // });
+        const aimlResponse = await axios.post("http://localhost:11434/api/generate", {
+            model: "llama3",
+            prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`,
+            stream: false
+        });
 
-        // const answer = llamaResponse.data.response;
+        const answer = aimlResponse.data.response;
 
 
-        const aimlResponse = await axios.post(
-            "https://api.aimlapi.com/v1/chat/completions",
-            {
-                model: "gpt-3.5-turbo",
-                messages: [
-                    {
-                        role: "user",
-                        content: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`
-                    }
-                ],
-                max_tokens: 500,
-                temperature: 0.7
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${process.env.AIMLAPI_KEY}`,
-                    "Content-Type": "application/json"
-                }
-            }
-        );
+        // const aimlResponse = await axios.post(
+        //     "https://api.aimlapi.com/v1/chat/completions",
+        //     {
+        //         model: "gpt-3.5-turbo",
+        //         messages: [
+        //             {
+        //                 role: "user",
+        //                 content: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`
+        //             }
+        //         ],
+        //         max_tokens: 500,
+        //         temperature: 0.7
+        //     },
+        //     {
+        //         headers: {
+        //             Authorization: `Bearer ${process.env.AIMLAPI_KEY}`,
+        //             "Content-Type": "application/json"
+        //         }
+        //     }
+        // );
         
-        const answer = aimlResponse.data.choices[0].message.content;
+        // const answer = aimlResponse.data.choices[0].message.content;
         
-        console.log(JSON.stringify(aimlResponse.data, null, 2));       
+        // console.log(JSON.stringify(aimlResponse.data, null, 2));       
 
         res.json({
             answer,
@@ -454,20 +461,26 @@ async function indexChunks(
 
     // Now allChunks is an array of text chunks, ready to send
 
-    const embedRes = await axios.post(
-        "https://api.cohere.ai/v1/embed",
-        {
-            texts: allChunks,
-            model: "embed-english-v3.0",
-            input_type: "search_document"
-        },
-        {
-            headers: {
-                "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
-                "Content-Type": "application/json"
-            }
-        }
-    );
+    // const embedRes = await axios.post(
+    //     "https://api.cohere.ai/v1/embed",
+    //     {
+    //         texts: allChunks,
+    //         model: "embed-english-v3.0",
+    //         input_type: "search_document"
+    //     },
+    //     {
+    //         headers: {
+    //             "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+    //             "Content-Type": "application/json"
+    //         }
+    //     }
+    // );
+
+    const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
+        texts: allChunks
+    });
+
+    
 
     const embeddings = embedRes.data.embeddings;
     const records = allChunks.map((chunkText, idx) => ({
