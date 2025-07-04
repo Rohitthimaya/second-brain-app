@@ -356,7 +356,9 @@ app.post("/query", authenticateToken, async (req, res) => {
 
         const answer = aimlResponse.data.response;
 
-
+        const responseObj = await Content.find({ title })
+        const responseLink = responseObj[0].link
+        const type = responseObj[0].type
         // const aimlResponse = await axios.post(
         //     "https://api.aimlapi.com/v1/chat/completions",
         //     {
@@ -385,12 +387,68 @@ app.post("/query", authenticateToken, async (req, res) => {
         res.json({
             answer,
             title,
-            context: relevantText
+            context: relevantText,
+            responseLink,
+            type
         });
 
     } catch (error) {
         console.error("Error during query handling:", error);
         res.status(500).json({ message: "Something went wrong!" });
+    }
+});
+
+app.post("/ask-doc", authenticateToken, async (req, res) => {
+    try {
+        const { question, link: title } = req.body;
+        const { user } = req as AuthenticatedRequest;
+
+        if (!question || !title) {
+            res.status(400).json({ message: "Question and title are required" });
+            return
+        }
+
+        // Step 1: Query Milvus with a filter to get all matching text chunks
+        const searchResult = await client.query({
+            collection_name: "embeddings",
+            output_fields: ["text"],
+            filter: `title == "${title}" && userId == "${user?.id}"`,
+        });
+
+        if (!searchResult) {
+            res.status(404).json({ message: "No context found for this document" });
+            return
+        }
+
+        console.log(searchResult)
+
+        const context = searchResult.data.map(item => item.text).join("\n\n");
+
+        // Step 2: Generate answer using Ollama or LLM of your choice
+        const aimlResponse = await axios.post("http://localhost:11434/api/generate", {
+            model: "llama3",
+            prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${question}`,
+            stream: false
+        });
+
+        const answer = aimlResponse.data.response;
+
+        // Optional: Retrieve content metadata from MongoDB
+        // const doc = await Content.findOne({ title });
+        // const responseLink = doc?.link || null;
+        // const type = doc?.type || null;
+
+        res.json({
+            answer,
+            // title,
+            // context: searchResult.map(r => r.text),
+            // responseLink,
+            // type
+        });
+
+    } catch (error) {
+        console.error("Error in /ask-doc:", error);
+        res.status(500).json({ message: "Server error" });
     }
 });
 
@@ -530,6 +588,22 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
                 res.status(500).json({ error: "PDF upload failed" });
                 return
             }
+        }else if(type == "audio" && req.file){
+            try {
+                const s3Res = await s3.upload({
+                    Bucket: `${process.env.S3_BUCKET_NAME}`,
+                    Key: `audios/${Date.now()}_${req.file.originalname}`,
+                    Body: req.file.buffer,
+                    ContentType: req.file.mimetype,
+                    ACL: "public-read"
+                  }).promise();
+              
+                  finalLink = s3Res.Location;
+            } catch (error) {
+                console.error("❌ audio upload failed:", error);
+                res.status(500).json({ error: "PDF upload failed" });
+                return
+            }
         }
 
         const content = { title, type, link: finalLink, tags, userId: user?.id };
@@ -598,9 +672,25 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
             
                 break;
             }          
-            case "note": {
-                
-            }
+            case "audio": {
+                if (!req.file) {
+                  res.status(400).json({ message: "No audio file uploaded" });
+                  return;
+                }
+                try {
+
+                  // process audio file, e.g., send to transcription service
+                  // const transcript = await yourTranscriptionFunction(req.file.buffer);
+                  // await indexChunks([transcript], content.title, user?.id, contentAdded._id);
+              
+                } catch (err) {
+                  console.error("❌ Audio upload failed:", err);
+                  res.status(500).json({ error: "Audio upload failed" });
+                  return;
+                }
+              
+                break;
+              }
         }
 
         res.status(200).json({ message: "Content indexed and stored", content: contentAdded });
