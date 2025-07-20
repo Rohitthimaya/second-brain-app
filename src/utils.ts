@@ -6,3 +6,4 @@ export function random(len: number){
     }
     return ans
 }
+  

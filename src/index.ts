@@ -23,7 +23,7 @@ import AWS from "aws-sdk";
 // import { YoutubeTranscript } from "youtube-transcript";
 import cors from "cors";
 import { text } from "body-parser";
-
+import ChatHistory from "./db/schemas/chatSchema";
 dotenv.config();
 
 const { OAuth2Client } = require('google-auth-library');
@@ -251,7 +251,7 @@ app.post("/pdf/index", authenticateToken, upload.single('file'), async (req, res
     //         }
     //     }
     // ); 
-    
+
     const response = await axios.post("http://127.0.0.1:5000/embed", {
         texts: chunks
     });
@@ -317,7 +317,7 @@ app.post("/query", authenticateToken, async (req, res) => {
         const response = await axios.post("http://127.0.0.1:5000/embed", {
             texts: [query]
         });
-        
+
         const queryEmbedding = response.data.embeddings[0];
         console.log("Query embedding:", queryEmbedding);
 
@@ -379,9 +379,9 @@ app.post("/query", authenticateToken, async (req, res) => {
         //         }
         //     }
         // );
-        
+
         // const answer = aimlResponse.data.choices[0].message.content;
-        
+
         // console.log(JSON.stringify(aimlResponse.data, null, 2));       
 
         res.json({
@@ -550,7 +550,7 @@ async function indexChunks(
         texts: allChunks
     });
 
-    
+
 
     const embeddings = embedRes.data.embeddings;
     const records = allChunks.map((chunkText, idx) => ({
@@ -588,7 +588,7 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
                 res.status(500).json({ error: "PDF upload failed" });
                 return
             }
-        }else if(type == "audio" && req.file){
+        } else if (type == "audio" && req.file) {
             try {
                 const s3Res = await s3.upload({
                     Bucket: `${process.env.S3_BUCKET_NAME}`,
@@ -596,9 +596,9 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
                     Body: req.file.buffer,
                     ContentType: req.file.mimetype,
                     ACL: "public-read"
-                  }).promise();
-              
-                  finalLink = s3Res.Location;
+                }).promise();
+
+                finalLink = s3Res.Location;
             } catch (error) {
                 console.error("❌ audio upload failed:", error);
                 res.status(500).json({ error: "PDF upload failed" });
@@ -624,10 +624,10 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
         switch (type) {
             case "tweet": {
                 const tweetId = extractTweetId(finalLink);
-                if (!tweetId){
+                if (!tweetId) {
                     res.status(400).json({ message: "Invalid tweet URL" });
                     return
-                } 
+                }
 
                 const { textChunks } = await fetchSingleTweetContent(tweetId);
                 await indexChunks(textChunks, content.title, user?.id, contentAdded._id);
@@ -636,7 +636,7 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
 
             case "youtube": {
                 const videoId = extractYouTubeId(finalLink);
-                if (!videoId){
+                if (!videoId) {
                     res.status(400).json({ message: "Invalid YouTube URL" });
                     return
                 }
@@ -660,7 +660,7 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
                     res.status(400).json({ message: "No DOCX file uploaded" });
                     return;
                 }
-            
+
                 try {
                     const docxText = await extractTextFromDocxBuffer(req.file.buffer);
                     await indexChunks([docxText], content.title, user?.id, contentAdded._id, 1000);
@@ -669,28 +669,39 @@ app.post("/api/v1/content", authenticateToken, upload.single("file"), async (req
                     res.status(500).json({ error: "DOCX upload or processing failed" });
                     return;
                 }
-            
+
                 break;
-            }          
+            }
             case "audio": {
                 if (!req.file) {
-                  res.status(400).json({ message: "No audio file uploaded" });
-                  return;
+                    res.status(400).json({ message: "No audio file uploaded" });
+                    return;
                 }
                 try {
 
-                  // process audio file, e.g., send to transcription service
-                  // const transcript = await yourTranscriptionFunction(req.file.buffer);
-                  // await indexChunks([transcript], content.title, user?.id, contentAdded._id);
-              
+                    // process audio file, e.g., send to transcription service
+                    // const transcript = await yourTranscriptionFunction(req.file.buffer);
+                    // await indexChunks([transcript], content.title, user?.id, contentAdded._id);
+
                 } catch (err) {
-                  console.error("❌ Audio upload failed:", err);
-                  res.status(500).json({ error: "Audio upload failed" });
-                  return;
+                    console.error("❌ Audio upload failed:", err);
+                    res.status(500).json({ error: "Audio upload failed" });
+                    return;
                 }
-              
+
                 break;
-              }
+            }
+            case "note": {
+                if (!finalLink || finalLink.trim() === "") {
+                    res.status(400).json({ message: "Note content cannot be empty." });
+                    return;
+                }
+
+                // Index the note body as a text chunk
+                await indexChunks([finalLink], content.title, user?.id, contentAdded._id, 1000);
+                break;
+            }
+
         }
 
         res.status(200).json({ message: "Content indexed and stored", content: contentAdded });
@@ -817,6 +828,130 @@ app.get("/api/v1/brain/:shareLink", authenticateToken, async (req, res) => {
         return
     }
 })
+
+app.post("/api/v1/conversations/history", authenticateToken, async (req, res) => {
+    try {
+        const { user } = req as AuthenticatedRequest;
+        const { title, contentLink, chats, type } = req.body;
+
+        // Validation
+        if (!title || !contentLink || !type || !Array.isArray(chats) || chats.length === 0) {
+            res.status(400).json({
+                message: "title, type, contentLink, and chats[] are required",
+            });
+            return
+        }
+
+        // Validate chat structure
+        const invalidChat = chats.some(
+            (chat) => !chat.question || !chat.answer
+        );
+        if (invalidChat) {
+            res.status(400).json({
+                message: "Each chat must have both question and answer",
+            });
+            return
+        }
+
+        // Save to DB
+        const newHistory = await ChatHistory.create({
+            userId: user?.id,
+            title,
+            contentLink,
+            chats,
+            type
+        });
+
+        res.status(201).json({
+            message: "Chat history saved successfully",
+            history: newHistory,
+        });
+    } catch (error) {
+        console.error("❌ Error saving chat history:", error);
+        res.status(500).json({ message: "Failed to save chat history" });
+    }
+});
+
+app.get("/api/v1/conversations/history", authenticateToken, async (req, res) => {
+    try {
+        const { user } = req as AuthenticatedRequest;
+
+        const histories = await ChatHistory.find({ userId: user?.id })
+            .select("-__v") // optional: remove __v from response
+            .sort({ updatedAt: -1 }); // latest first
+
+        res.status(200).json({ histories });
+    } catch (error) {
+        console.error("❌ Error fetching chat histories:", error);
+        res.status(500).json({ message: "Failed to fetch chat histories" });
+    }
+});
+
+app.get("/api/v1/conversations/history/:id", authenticateToken, async (req, res) => {
+    try {
+        const { user } = req as AuthenticatedRequest;
+        const { id } = req.params;
+
+        const history = await ChatHistory.findOne({ _id: id, userId: user?.id });
+
+        if (!history) {
+            res.status(404).json({ message: "Chat history not found" });
+            return
+        }
+
+        res.status(200).json({ history });
+    } catch (error) {
+        console.error("❌ Error fetching specific chat history:", error);
+        res.status(500).json({ message: "Failed to fetch chat history" });
+    }
+});
+
+app.put("/api/v1/conversations/history/:id", authenticateToken, async (req, res) => {
+    try {
+        const { user } = req as AuthenticatedRequest;
+        const { id } = req.params;
+        const { title, contentLink, chats, type } = req.body;
+
+        const updated = await ChatHistory.findOneAndUpdate(
+            { _id: id, userId: user?.id },
+            { title, contentLink, chats, type },
+            { new: true }
+        );
+
+        if (!updated) {
+            res.status(404).json({ message: "Chat history not found" });
+            return
+        }
+
+        res.status(200).json({ message: "Chat updated", history: updated });
+    } catch (error) {
+        console.error("❌ Error updating chat history:", error);
+        res.status(500).json({ message: "Failed to update chat history" });
+    }
+});
+
+app.delete("/api/v1/conversations/history/:id", authenticateToken, async (req, res) => {
+    try {
+        const { user } = req as AuthenticatedRequest;
+        const { id } = req.params;
+
+        const deleted = await ChatHistory.findOneAndDelete({
+            _id: id,
+            userId: user?.id,
+        });
+
+        if (!deleted) {
+            res.status(404).json({ message: "Chat history not found or unauthorized" });
+            return
+        }
+
+        res.status(200).json({ message: "Chat history deleted successfully" });
+    } catch (error) {
+        console.error("❌ Error deleting chat history:", error);
+        res.status(500).json({ message: "Failed to delete chat history" });
+    }
+});
+
 
 app.listen(3000, () => {
     console.log(`App running on port: ${8080}`)
