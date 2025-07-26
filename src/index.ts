@@ -299,24 +299,24 @@ app.post("/query", authenticateToken, async (req, res) => {
         }
 
         // Step 1: Get embedding of query
-        // const response = await axios.post(
-        //     "https://api.cohere.ai/v1/embed",
-        //     {
-        //         texts: [query],
-        //         model: "embed-english-v3.0",
-        //         input_type: "search_document"
-        //     },
-        //     {
-        //         headers: {
-        //             "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
-        //             "Content-Type": "application/json"
-        //         }
-        //     }
-        // );
+        const response = await axios.post(
+            "https://api.cohere.ai/v1/embed",
+            {
+                texts: [query],
+                model: "embed-english-v3.0",
+                input_type: "search_document"
+            },
+            {
+                headers: {
+                    "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+                    "Content-Type": "application/json"
+                }
+            }
+        );
 
-        const response = await axios.post("http://127.0.0.1:5000/embed", {
-            texts: [query]
-        });
+        // const response = await axios.post("http://127.0.0.1:5000/embed", {
+        //     texts: [query]
+        // });
 
         const queryEmbedding = response.data.embeddings[0];
         console.log("Query embedding:", queryEmbedding);
@@ -348,39 +348,39 @@ app.post("/query", authenticateToken, async (req, res) => {
         console.log("Top context chunks:\n", context);
 
         // Step 3: Ask LLaMA 3 via Ollama
-        const aimlResponse = await axios.post("http://localhost:11434/api/generate", {
-            model: "llama3",
-            prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`,
-            stream: false
-        });
+        // const aimlResponse = await axios.post("http://localhost:11434/api/generate", {
+        //     model: "llama3",
+        //     prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`,
+        //     stream: false
+        // });
 
-        const answer = aimlResponse.data.response;
+        // const answer = aimlResponse.data.response;
 
         const responseObj = await Content.find({ title })
         const responseLink = responseObj[0].link
         const type = responseObj[0].type
-        // const aimlResponse = await axios.post(
-        //     "https://api.aimlapi.com/v1/chat/completions",
-        //     {
-        //         model: "gpt-3.5-turbo",
-        //         messages: [
-        //             {
-        //                 role: "user",
-        //                 content: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`
-        //             }
-        //         ],
-        //         max_tokens: 500,
-        //         temperature: 0.7
-        //     },
-        //     {
-        //         headers: {
-        //             Authorization: `Bearer ${process.env.AIMLAPI_KEY}`,
-        //             "Content-Type": "application/json"
-        //         }
-        //     }
-        // );
+        const aimlResponse = await axios.post(
+            "https://api.aimlapi.com/v1/chat/completions",
+            {
+                model: "gpt-3.5-turbo",
+                messages: [
+                    {
+                        role: "user",
+                        content: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${query}`
+                    }
+                ],
+                max_tokens: 500,
+                temperature: 0.7
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.AIMLAPI_KEY}`,
+                    "Content-Type": "application/json"
+                }
+            }
+        );
 
-        // const answer = aimlResponse.data.choices[0].message.content;
+        const answer = aimlResponse.data.choices[0].message.content;
 
         // console.log(JSON.stringify(aimlResponse.data, null, 2));       
 
@@ -405,7 +405,7 @@ app.post("/ask-doc", authenticateToken, async (req, res) => {
 
         if (!question || !title) {
             res.status(400).json({ message: "Question and title are required" });
-            return
+            return;
         }
 
         // Step 1: Query Milvus with a filter to get all matching text chunks
@@ -415,16 +415,39 @@ app.post("/ask-doc", authenticateToken, async (req, res) => {
             filter: `title == "${title}" && userId == "${user?.id}"`,
         });
 
-        if (!searchResult) {
+        if (!searchResult || !searchResult.data || searchResult.data.length === 0) {
             res.status(404).json({ message: "No context found for this document" });
-            return
+            return;
         }
-
-        console.log(searchResult)
 
         const context = searchResult.data.map(item => item.text).join("\n\n");
 
-        // Step 2: Generate answer using Ollama or LLM of your choice
+        // Step 2: Generate answer using GPT-3.5 via AIMLAPI
+        const aimlResponse = await axios.post(
+            "https://api.aimlapi.com/v1/chat/completions",
+            {
+                model: "gpt-3.5-turbo",
+                messages: [
+                    {
+                        role: "user",
+                        content: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${question}`
+                    }
+                ],
+                max_tokens: 500,
+                temperature: 0.7
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.AIMLAPI_KEY}`,
+                    "Content-Type": "application/json"
+                }
+            }
+        );
+
+        const answer = aimlResponse.data.choices[0].message.content;
+
+        // --- OLD OLLAMA CALL (commented out) ---
+        /*
         const aimlResponse = await axios.post("http://localhost:11434/api/generate", {
             model: "llama3",
             prompt: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${question}`,
@@ -432,16 +455,12 @@ app.post("/ask-doc", authenticateToken, async (req, res) => {
         });
 
         const answer = aimlResponse.data.response;
-
-        // Optional: Retrieve content metadata from MongoDB
-        // const doc = await Content.findOne({ title });
-        // const responseLink = doc?.link || null;
-        // const type = doc?.type || null;
+        */
 
         res.json({
             answer,
             // title,
-            // context: searchResult.map(r => r.text),
+            // context: searchResult.data.map(r => r.text),
             // responseLink,
             // type
         });
@@ -451,6 +470,7 @@ app.post("/ask-doc", authenticateToken, async (req, res) => {
         res.status(500).json({ message: "Server error" });
     }
 });
+
 
 function extractTweetId(url: string): string | null {
     const match = url.match(/status\/(\d+)/);
@@ -531,25 +551,24 @@ async function indexChunks(
 
     // Now allChunks is an array of text chunks, ready to send
 
-    // const embedRes = await axios.post(
-    //     "https://api.cohere.ai/v1/embed",
-    //     {
-    //         texts: allChunks,
-    //         model: "embed-english-v3.0",
-    //         input_type: "search_document"
-    //     },
-    //     {
-    //         headers: {
-    //             "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
-    //             "Content-Type": "application/json"
-    //         }
-    //     }
-    // );
+    const embedRes = await axios.post(
+        "https://api.cohere.ai/v1/embed",
+        {
+            texts: allChunks,
+            model: "embed-english-v3.0",
+            input_type: "search_document"
+        },
+        {
+            headers: {
+                "Authorization": `Bearer ${process.env.COHERE_API_KEY}`,
+                "Content-Type": "application/json"
+            }
+        }
+    );
 
-    const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
-        texts: allChunks
-    });
-
+    // const embedRes = await axios.post("http://127.0.0.1:5000/embed", {
+    //     texts: allChunks
+    // });
 
 
     const embeddings = embedRes.data.embeddings;
