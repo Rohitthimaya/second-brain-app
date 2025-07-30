@@ -81,7 +81,7 @@ app.post('/auth/google', async (req, res) => {
             });
         }
 
-        const token = jwt.sign({ id: user._id, username: user.username }, `${process.env.SECRET_KEY}`, { expiresIn: '1d' })
+        const token = jwt.sign({ id: user._id, username: user.username }, `${process.env.SECRET_KEY}`, { expiresIn: '1y' })
 
         res.status(200).json({ message: "Authentication successful", token: token });
 
@@ -362,7 +362,7 @@ app.post("/query", authenticateToken, async (req, res) => {
         const aimlResponse = await axios.post(
             "https://api.aimlapi.com/v1/chat/completions",
             {
-                model: "gpt-3.5-turbo",
+                model: "gpt-4",
                 messages: [
                     {
                         role: "user",
@@ -422,27 +422,43 @@ app.post("/ask-doc", authenticateToken, async (req, res) => {
 
         const context = searchResult.data.map(item => item.text).join("\n\n");
 
-        // Step 2: Generate answer using GPT-3.5 via AIMLAPI
+        // Step 2: Generate answer using GPT-4 via AIMLAPI
         const aimlResponse = await axios.post(
             "https://api.aimlapi.com/v1/chat/completions",
             {
-                model: "gpt-3.5-turbo",
-                messages: [
-                    {
-                        role: "user",
-                        content: `Use the following context to answer the question.\n\nContext:\n${context}\n\nQuestion: ${question}`
-                    }
-                ],
-                max_tokens: 500,
-                temperature: 0.7
+              model: "gpt-4",
+              messages: [
+                {
+                  role: "system",
+                  content: `You are a helpful AI assistant embedded inside a second-brain app. 
+          You help the user extract insights, summaries, and answers from their personal content such as tweets, YouTube transcripts, PDFs, notes, and documents. 
+          Always reason step-by-step, be concise but informative, and cite exact phrases or parts from the context if possible.`
+                },
+                {
+                  role: "user",
+                  content: `Given the following context, answer the user's question accurately. 
+          Only use the information provided in the context. If unsure, say "Not enough information in the context."
+          
+          ---CONTEXT START---
+          ${context}
+          ---CONTEXT END---
+          
+          Question: ${question}
+          
+          Respond in markdown. If applicable, structure the answer using bullet points, numbered steps, or concise paragraphs.`
+                }
+              ],
+              max_tokens: 500,
+              temperature: 0.7
             },
             {
-                headers: {
-                    Authorization: `Bearer ${process.env.AIMLAPI_KEY}`,
-                    "Content-Type": "application/json"
-                }
+              headers: {
+                Authorization: `Bearer ${process.env.AIMLAPI_KEY}`,
+                "Content-Type": "application/json"
+              }
             }
-        );
+          );
+          
 
         const answer = aimlResponse.data.choices[0].message.content;
 
