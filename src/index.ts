@@ -1025,5 +1025,5 @@ app.delete("/api/v1/conversations/history/:id", authenticateToken, async (req, r
 
 
 app.listen(3000, () => {
-    console.log(`App running on port: ${8080}`)
+    console.log(`App running on port: ${3000}`)
 })
